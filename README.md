@@ -31,12 +31,12 @@ The scale sends no bone mass on this model (that field is always zero).
 
 ## Setup
 
-1. **Find the scale's address.** Hold the **UNIT** button on the base of the scale
+1. **Find the scale's MAC address.** Hold the **UNIT** button on the base of the scale
    until the pairing symbol shows. While it is in pairing mode it advertises a
    6-digit name starting with `1` (e.g. `113196`) and service `0x7882`. Look for it in
    Home Assistant (*Settings → Devices & services → Bluetooth → Advertisement
    monitor*) or with a phone app such as nRF Connect.
-2. **Add the package** to your ESPHome device and set your values. Values set in your
+2. **Add the package** to your ESPHome device, that is closest to the scale, and set your values. Values set in your
    own `substitutions:` override the defaults in `salter.yaml`:
 
    ```yaml
@@ -54,7 +54,7 @@ The scale sends no bone mass on this model (that field is always zero).
        files: [salter.yaml]
    ```
 
-   Or copy `salter.yaml` next to your device config and use
+   Or copy `salter.yaml` into the same folder as your device config and use
    `salter: !include salter.yaml`. A complete stand-alone example is in
    [`examples/esp32-c3-bridge.yaml`](examples/esp32-c3-bridge.yaml).
 3. **Install** the firmware.
@@ -66,7 +66,7 @@ The scale sends no bone mass on this model (that field is always zero).
 
 Each time:
 
-1. Press the button and select **your user number** (the slot the ESP32 claimed,
+1. Wake the scale, press the center button and select **your user number** (the slot the ESP32 claimed,
    usually 1) with the arrow buttons.
 2. Wait for the display to show zero, then step on **barefoot**.
 
