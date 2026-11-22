@@ -1,0 +1,41 @@
+# Stand-alone ESP32-C3 bridge for a Salter MiBody scale.
+# Any ESP32 with Bluetooth works; an existing ESPHome device (for example a
+# Bluetooth proxy) can simply add the `packages:` block below instead.
+
+substitutions:
+  name: salter-scale
+  friendly_name: Salter scale
+  # These override the defaults in salter.yaml
+  scale_mac: "AA:BB:CC:DD:EE:FF"
+  user_name: "Me"
+  user_age: "40"
+  user_height_cm: "175"
+  user_sex: "1"            # 1 = male, 2 = female
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+packages:
+  salter:
+    url: https://github.com/johnradford49/esphome-salter-mibody
+    ref: main
+    files: [salter.yaml]
+  # or, with salter.yaml copied into your ESPHome config folder:
+  # salter: !include salter.yaml

@@ -1,0 +1,386 @@
+# --- Salter MiBody 9159 -> Home Assistant (ESPHome package) ---
+# Save this file as salter.yaml in your ESPHome config folder, then add to
+# touch-display-bedroom's YAML:
+#
+#   packages:
+#     salter: !include salter.yaml
+#
+# Packages merge with the device's own sensor:, globals:, script: etc.
+# sections, so nothing in the display's config needs editing.
+# Set scale_mac and your profile below, install, then pair once:
+# hold UNIT on the base of the scale until the pairing symbol shows.
+# After that: select your user number on the scale, step on barefoot.
+#
+# Handshake (Lifesense/Transtek; scale -> 8A82, host -> 8A81):
+#   Pair : A0 pwd -> 21 bcast | A1 rnd -> 20 rnd^pwd | 83 slot.. -> 03 slot name,
+#          51 user info, 02 time, 22
+#   Sync : A1 rnd -> 20 rnd^pwd, 21 bcast, 02 time | C0 -> 51 user info, 22
+#   Scale then sends the weight on 8A21 and body composition on 8A22.
+
+substitutions:
+  scale_mac: "AA:BB:CC:DD:EE:FF"   # your scale's Bluetooth address
+  # Your profile - the scale uses these for body fat / water / muscle.
+  user_name: "Me"          # up to 16 characters, shown in the scale's user list
+  user_age: "40"           # 18-100
+  user_height_cm: "175"    # 100-204
+  user_sex: "1"            # 1 = male, 2 = female
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    # Listen ~94% of the time so the scale's short advertising burst isn't
+    # missed, while leaving Wi-Fi room on the shared radio
+    interval: 320ms
+    window: 300ms
+
+time:
+  - platform: homeassistant
+    id: salter_time
+
+globals:
+  # Password the scale hands out in pairing mode (0xA0 packet). Learned at pairing.
+  - id: salter_pwd
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+  # Broadcast id we give the scale at pairing; sent again on every sync.
+  - id: salter_bcast
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+  - id: salter_random
+    type: uint32_t
+    initial_value: "0"
+  # Scale user slot we are bound to (0 = not paired yet)
+  - id: salter_slot
+    type: uint8_t
+    restore_value: true
+    initial_value: "0"
+  - id: salter_offered_slot
+    type: uint8_t
+    initial_value: "0"
+  # Timestamp (secs since 2010, local) of the newest reading already published.
+  # The scale replays its stored history on every sync; anything not newer
+  # than this is skipped. While 0, readings older than 1 hour are skipped.
+  - id: salter_last_weight_ts
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+  - id: salter_last_body_ts
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+
+ble_client:
+  - mac_address: ${scale_mac}
+    id: salter_scale
+    on_connect:
+      then:
+        - logger.log: "Salter: connected, waiting for A0/A1 on 8A82"
+        - binary_sensor.template.publish:
+            id: salter_connected
+            state: true
+    on_disconnect:
+      then:
+        - logger.log: "Salter: disconnected"
+        - binary_sensor.template.publish:
+            id: salter_connected
+            state: false
+
+binary_sensor:
+  - platform: template
+    id: salter_connected
+    name: "Salter connected"
+    device_class: connectivity
+    entity_category: diagnostic
+
+script:
+  # --- shared write helpers -------------------------------------------------
+  - id: salter_write_xor
+    then:
+      - ble_client.ble_write:
+          id: salter_scale
+          service_uuid: "7882"
+          characteristic_uuid: "8a81"
+          value: !lambda |-
+            uint32_t r = id(salter_random) ^ id(salter_pwd);
+            return {0x20, (uint8_t)r, (uint8_t)(r >> 8), (uint8_t)(r >> 16), (uint8_t)(r >> 24)};
+
+  - id: salter_write_bcast
+    then:
+      - ble_client.ble_write:
+          id: salter_scale
+          service_uuid: "7882"
+          characteristic_uuid: "8a81"
+          value: !lambda |-
+            uint32_t b = id(salter_bcast);
+            return {0x21, (uint8_t)b, (uint8_t)(b >> 8), (uint8_t)(b >> 16), (uint8_t)(b >> 24)};
+
+  - id: salter_write_time
+    then:
+      - ble_client.ble_write:
+          id: salter_scale
+          service_uuid: "7882"
+          characteristic_uuid: "8a81"
+          # 0x02 + local wall-clock seconds since 2010-01-01, little-endian
+          value: !lambda |-
+            uint32_t t = id(salter_time).now().timestamp + ESPTime::timezone_offset() - 1262304000UL;
+            return {0x02, (uint8_t)t, (uint8_t)(t >> 8), (uint8_t)(t >> 16), (uint8_t)(t >> 24)};
+
+  - id: salter_write_userinfo
+    then:
+      - ble_client.ble_write:
+          id: salter_scale
+          service_uuid: "7882"
+          characteristic_uuid: "8a81"
+          # 51 DF <slot> <sex> <age> <height: 0xE000+cm LE> <activity> <unit kg=0> <goal 0.0 = 00 00 00 FF> 00 00
+          value: !lambda |-
+            uint16_t h = 0xE000 + ${user_height_cm};
+            uint8_t slot = id(salter_slot) ? id(salter_slot) : id(salter_offered_slot);
+            return {0x51, 0xDF, slot, ${user_sex}, ${user_age}, (uint8_t)(h & 0xFF), (uint8_t)(h >> 8),
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00};
+
+  - id: salter_write_disconnect
+    then:
+      - ble_client.ble_write:
+          id: salter_scale
+          service_uuid: "7882"
+          characteristic_uuid: "8a81"
+          value: [0x22]
+
+  # --- pairing: after A0 -> send broadcast id; scale answers with A1 ---------
+  - id: salter_pair_start
+    then:
+      - logger.log: "Salter: pairing - sending broadcast id"
+      - script.execute: salter_write_bcast
+
+  # --- A1 challenge: always answer with XOR. If already bound, finish sync ---
+  - id: salter_on_random
+    then:
+      - script.execute: salter_write_xor
+      - script.wait: salter_write_xor
+      - if:
+          condition:
+            lambda: "return id(salter_slot) != 0;"
+          then:
+            - logger.log: "Salter: sync - sending broadcast id and time"
+            - delay: 100ms
+            - script.execute: salter_write_bcast
+            - script.wait: salter_write_bcast
+            - delay: 100ms
+            - script.execute: salter_write_time
+          else:
+            - logger.log: "Salter: pairing - waiting for user slot list (0x83)"
+
+  # --- pairing: 1 s after the last 0x83 slot packet, bind to the slot -------
+  - id: salter_bind
+    mode: restart
+    then:
+      - delay: 1s
+      - lambda: |-
+          ESP_LOGI("salter", "Binding to user slot %u", id(salter_offered_slot));
+      - ble_client.ble_write:
+          id: salter_scale
+          service_uuid: "7882"
+          characteristic_uuid: "8a81"
+          # 03 <slot> <name, space-padded to 16 bytes>
+          value: !lambda |-
+            std::vector<uint8_t> v = {0x03, id(salter_offered_slot)};
+            std::string n = "${user_name}";
+            for (size_t i = 0; i < 16; i++) v.push_back(i < n.size() ? (uint8_t) n[i] : 0x20);
+            return v;
+      - delay: 100ms
+      - script.execute: salter_write_userinfo
+      - script.wait: salter_write_userinfo
+      - delay: 100ms
+      - script.execute: salter_write_time
+      - script.wait: salter_write_time
+      - delay: 100ms
+      - lambda: "id(salter_slot) = id(salter_offered_slot);"
+      - script.execute: salter_write_disconnect
+      - logger.log: "Salter: pairing complete - step on the scale for the first weigh"
+
+  # --- sync: scale recognised us (0xC0) -> send profile, then 0x22 ----------
+  - id: salter_on_userinfo_request
+    then:
+      - script.execute: salter_write_userinfo
+      - logger.log: "Salter: profile sent, waiting for measurement"
+
+  # End the session 3 s after the last measurement packet, so body
+  # composition (8A22) has time to arrive after the weight (8A21)
+  - id: salter_finish
+    mode: restart
+    then:
+      - delay: 3s
+      - logger.log: "Salter: measurements done, sending 0x22"
+      - script.execute: salter_write_disconnect
+
+sensor:
+  # Command/response channel (8A82)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: salter_scale
+    id: salter_8a82
+    internal: true
+    service_uuid: "7882"
+    characteristic_uuid: "8a82"
+    notify: true
+    update_interval: never
+    lambda: |-
+      id(salter_raw_8a82).publish_state(format_hex_pretty(x));
+      ESP_LOGI("salter", "8A82: %s", format_hex_pretty(x).c_str());
+      if (x.empty()) return NAN;
+      uint32_t v = x.size() >= 5 ? (x[1] | (x[2] << 8) | (x[3] << 16) | ((uint32_t) x[4] << 24)) : 0;
+      switch (x[0]) {
+        case 0xA0:  // pairing mode: password
+          id(salter_pwd) = v;
+          if (id(salter_bcast) == 0) id(salter_bcast) = v ^ 0x5A5A5A5A;
+          id(salter_slot) = 0;
+          id(salter_offered_slot) = 0;
+          id(salter_pair_start).execute();
+          break;
+        case 0xA1:  // challenge
+          id(salter_random) = v;
+          id(salter_on_random).execute();
+          break;
+        case 0x83:  // free user slot (pairing)
+          if (x.size() >= 2 && id(salter_offered_slot) == 0) id(salter_offered_slot) = x[1];
+          id(salter_bind).execute();
+          break;
+        case 0xC0:  // scale recognised our broadcast id
+          id(salter_on_userinfo_request).execute();
+          break;
+      }
+      return x[0];
+
+  # Weight packets (8A21): flags | weight(3-byte mantissa + int8 exponent) |
+  # [timestamp 4] [resistance1 4] [resistance2 4] [user 1] [status 1]
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: salter_scale
+    id: salter_weight
+    name: "Salter weight"
+    service_uuid: "7882"
+    characteristic_uuid: "8a21"
+    notify: true
+    update_interval: never
+    unit_of_measurement: kg
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - filter_out: nan
+      - round: 1
+    lambda: |-
+      id(salter_raw_weight).publish_state(format_hex_pretty(x));
+      id(salter_finish).execute();
+      ESP_LOGI("salter", "8A21: %s", format_hex_pretty(x).c_str());
+      if (x.size() < 5) return NAN;
+      uint8_t f = x[0];
+      uint32_t m = x[1] | (x[2] << 8) | (x[3] << 16);
+      float w = m * powf(10.0f, (int8_t) x[4]);
+      size_t i = 5;
+      uint32_t ts = 0;
+      if ((f & 0x01) && i + 4 <= x.size()) {
+        ts = x[i] | (x[i + 1] << 8) | (x[i + 2] << 16) | ((uint32_t) x[i + 3] << 24);
+        i += 4;
+      }
+      if (f & 0x02) i += 4;   // resistance 1
+      if (f & 0x04) i += 4;   // resistance 2 (impedance)
+      uint8_t user = 0;
+      if ((f & 0x08) && i < x.size()) { user = x[i]; i++; }
+      if ((f & 0x10) && i < x.size() && !(x[i] & 0x01)) return NAN;  // not stable
+      uint32_t now2010 = id(salter_time).now().is_valid()
+          ? id(salter_time).now().timestamp + ESPTime::timezone_offset() - 1262304000UL : 0;
+      if (ts != 0 && id(salter_last_weight_ts) == 0 && now2010 > ts + 3600) {
+        ESP_LOGI("salter", "Skipping old stored reading %.1f kg (ts %u)", w, ts);
+        return NAN;
+      }
+      if (ts != 0 && ts <= id(salter_last_weight_ts)) {
+        ESP_LOGI("salter", "Skipping stored reading %.1f kg (ts %u)", w, ts);
+        return NAN;
+      }
+      if (ts != 0) id(salter_last_weight_ts) = ts;
+      if (user) id(salter_user).publish_state(user);
+      uint8_t unit = (f >> 5) & 0x03;
+      if (unit != 0) w *= 0.45359237f;  // lb / st readings -> kg
+      return w;
+
+  # Body composition (8A22) - layout still to be verified against real data
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: salter_scale
+    id: salter_fat
+    name: "Salter body fat"
+    service_uuid: "7882"
+    characteristic_uuid: "8a22"
+    notify: true
+    update_interval: never
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - filter_out: nan
+    lambda: |-
+      id(salter_raw_body).publish_state(format_hex_pretty(x));
+      id(salter_finish).execute();
+      ESP_LOGI("salter", "8A22: %s", format_hex_pretty(x).c_str());
+      if (x.size() < 16) return NAN;
+      // bytes 1-4: timestamp; 5: user; then 16-bit SFLOAT values
+      // (12-bit mantissa, 4-bit signed exponent):
+      // 6-7 fat %, 8-9 water %, 10-11 muscle % (12-13 always 0 on this model)
+      uint32_t ts = x[1] | (x[2] << 8) | (x[3] << 16) | ((uint32_t) x[4] << 24);
+      uint32_t now2010 = id(salter_time).now().is_valid()
+          ? id(salter_time).now().timestamp + ESPTime::timezone_offset() - 1262304000UL : 0;
+      if (id(salter_last_body_ts) == 0 && now2010 > ts + 3600) {
+        ESP_LOGI("salter", "Skipping old stored body reading (ts %u)", ts);
+        return NAN;
+      }
+      if (ts <= id(salter_last_body_ts)) {
+        ESP_LOGI("salter", "Skipping stored body reading (ts %u)", ts);
+        return NAN;
+      }
+      id(salter_last_body_ts) = ts;
+      auto sf = [&](size_t k) -> float {
+        uint16_t r = x[k] | (x[k + 1] << 8);
+        int16_t mant = r & 0x0FFF;
+        if (mant >= 0x0800) mant -= 0x1000;
+        int8_t ex = (r >> 12) & 0x0F;
+        if (ex >= 8) ex -= 16;
+        return mant * powf(10.0f, ex);
+      };
+      id(salter_water).publish_state(sf(8));
+      id(salter_muscle).publish_state(sf(10));
+      return sf(6);
+
+  - platform: template
+    id: salter_water
+    name: "Salter body water"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+  - platform: template
+    id: salter_muscle
+    name: "Salter muscle"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+  - platform: template
+    id: salter_user
+    name: "Salter user"
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: template
+    id: salter_raw_weight
+    name: "Salter raw 8A21"
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: template
+    id: salter_raw_body
+    name: "Salter raw 8A22"
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: template
+    id: salter_raw_8a82
+    name: "Salter raw 8A82"
+    entity_category: diagnostic
+    disabled_by_default: true
