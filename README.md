@@ -54,6 +54,11 @@ The scale sends no bone mass on this model (that field is always zero).
        files: [salter.yaml]
    ```
 
+   > **If your device YAML already has a `substitutions:` section, add these lines to
+   > it.** A second `substitutions:` section is silently ignored. The package then falls
+   > back to its placeholder address `AA:BB:CC:DD:EE:FF` and never connects to the scale.
+   > Run *Validate* in ESPHome and check that `scale_mac` shows your scale's address.
+
    Or copy `salter.yaml` into the same folder as your device config and use
    `salter: !include salter.yaml`. A complete stand-alone example is in
    [`examples/esp32-c3-bridge.yaml`](examples/esp32-c3-bridge.yaml).
